@@ -62,7 +62,6 @@ strong_transform = A.Compose([
 
 strong_transform_resnet = A.Compose([
     A.Resize(height=RESNET_IMAGE_RESOLUTION[0], width=RESNET_IMAGE_RESOLUTION[1], p=1.0),
-    A.HorizontalFlip(p=0.5),
     A.RandomResizedCrop(RESNET_IMAGE_RESOLUTION, p=0.5, scale=(0.7, 1.0)),
     A.RGBShift(p=0.5),
     A.Blur(blur_limit=11, p=0.5),

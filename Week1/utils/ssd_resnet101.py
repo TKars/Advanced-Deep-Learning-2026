@@ -1,16 +1,14 @@
-"""SSD с backbone ResNet18; вход 3×720×1280 (см. задание недели 2)."""
-
 import torch
 import torch.nn as nn
-from torchvision.models import resnet18, ResNet18_Weights, resnet50, ResNet50_Weights
+from torchvision.models import resnet101, ResNet101_Weights
 
 from prior_boxes import prior_boxes
 
-# по ГОСТу,  номерной знак 520×112 мм ->  отношение сторон w/h (для горизонтального якоря).
+# ГОСТ: номерной знак 520×112 мм → отношение сторон w/h (для горизонтального якоря в prior_boxes).
 PLATE_WH_RATIO = 520 / 112
 
 
-def ssd_resnet18_cfg():
+def ssd_resnet101_cfg():
     """Карты признаков после layer2…layer4 и трёх extra-блоков (без финального 1×1).
 
     Якоря: меньшие min_sizes на fine-картах; среди aspect ratio — явное w/h номера (520:112).
@@ -42,21 +40,20 @@ def _num_priors_per_cell(aspect_ratio_list):
 
 
 def build_priors(cfg=None, device=None):
-    cfg = cfg or ssd_resnet18_cfg() 
+    cfg = cfg or ssd_resnet101_cfg()
     p = prior_boxes(cfg)
     if device is not None:
         p = p.to(device)
     return p
 
 
-class SSDResNet18(nn.Module):
+class SSDResNet101(nn.Module):
     
-
     def __init__(self, num_classes=3, pretrained_backbone=True):
         super().__init__()
         self.num_classes = num_classes
-        w = ResNet18_Weights.DEFAULT if pretrained_backbone else None
-        backbone = resnet18(weights=w)
+        w = ResNet101_Weights.DEFAULT if pretrained_backbone else None
+        backbone = resnet101(weights=w)
         self.conv1 = backbone.conv1
         self.bn1 = backbone.bn1
         self.relu = backbone.relu
@@ -66,10 +63,11 @@ class SSDResNet18(nn.Module):
         self.layer3 = backbone.layer3
         self.layer4 = backbone.layer4
 
+        # Дополнительные блоки адаптированы под выход layer4 ResNet101, в котором 2048 каналов.
         self.extras = nn.ModuleList(
             [
                 nn.Sequential(
-                    nn.Conv2d(512, 512, 3, padding=1),
+                    nn.Conv2d(2048, 512, 3, padding=1),
                     nn.ReLU(inplace=True),
                     nn.Conv2d(512, 512, 3, stride=2, padding=1),
                     nn.ReLU(inplace=True),
@@ -89,9 +87,12 @@ class SSDResNet18(nn.Module):
             ]
         )
 
-        cfg = ssd_resnet18_cfg()
+        cfg = ssd_resnet101_cfg()
         self.aspect_ratios = cfg["aspect_ratios"]
-        sources_channels = [128, 256, 512, 512, 256, 128]
+        
+        # Кол-во входных каналов для каждой feature map от resnet101 и extras
+        # layer2: 512, layer3: 1024, layer4: 2048, extra1: 512, extra2: 256, extra3: 128
+        sources_channels = [512, 1024, 2048, 512, 256, 128]
 
         self.loc_layers = nn.ModuleList()
         self.conf_layers = nn.ModuleList()
@@ -104,16 +105,19 @@ class SSDResNet18(nn.Module):
         x = self.relu(self.bn1(self.conv1(x)))
         x = self.maxpool(x)
         x = self.layer1(x)
+        
         x = self.layer2(x)
         sources = [x]
+        
         x = self.layer3(x)
         sources.append(x)
+        
         x = self.layer4(x)
         sources.append(x)
+        
         for ex in self.extras:
             x = ex(x)
             sources.append(x)
-
         loc_list, conf_list = [], []
         for loc_layer, conf_layer, feat in zip(self.loc_layers, self.conf_layers, sources):
             loc_list.append(loc_layer(feat).permute(0, 2, 3, 1).contiguous())
@@ -121,17 +125,20 @@ class SSDResNet18(nn.Module):
 
         loc = torch.cat([o.view(o.size(0), -1) for o in loc_list], dim=1)
         conf = torch.cat([o.view(o.size(0), -1) for o in conf_list], dim=1)
+        
         loc = loc.view(loc.size(0), -1, 4)
         conf = conf.view(conf.size(0), -1, self.num_classes)
         return loc, conf
 
 
 def verify_shapes():
-    cfg = ssd_resnet18_cfg()
-    m = SSDResNet18(num_classes=cfg["num_classes"], pretrained_backbone=False)
+    cfg = ssd_resnet101_cfg()
+    m = SSDResNet101(num_classes=cfg["num_classes"], pretrained_backbone=False)
     x = torch.zeros(1, 3, 720, 1280)
+    
     loc, conf = m(x)
     pri = prior_boxes(cfg)
+    
     assert loc.shape[1] == pri.shape[0] == conf.shape[1], (loc.shape, conf.shape, pri.shape)
     return loc.shape, conf.shape, pri.shape
 
